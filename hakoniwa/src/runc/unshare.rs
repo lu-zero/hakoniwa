@@ -109,6 +109,9 @@ fn initialize_rootfs(command: &Command, container: &Container) -> Result<()> {
             }
 
             // Hang on to the old proc in order to mount the new proc later on.
+            // The bind must be recursive (a non-recursive bind of /proc fails
+            // EINVAL); its submounts (e.g. /proc/sys/fs/binfmt_misc) are torn down
+            // lazily at teardown — see the rmdir in mount2() and ebusy-issue.md.
             let oldproc = command.runtime_mount_oldproc.clone();
             sys::mkdir_p(&oldproc)?;
             sys::mount("/proc", &oldproc, MsFlags::MS_BIND | MsFlags::MS_REC)?;
@@ -312,7 +315,13 @@ fn mount2(command: &Command, container: &Container) -> Result<()> {
 
         let oldproc = format!("/{0}", command.runtime_mount_oldproc);
         sys::unmount(&oldproc)?;
-        sys::rmdir(&oldproc)?;
+        // Best-effort: `unmount` above is a lazy umount2(MNT_DETACH), so when the
+        // recursive /proc bind carries submounts (e.g. /proc/sys/fs/binfmt_misc on
+        // many hosts) the placeholder can still be busy and the rmdir races the
+        // async detach (EBUSY). The leftover empty dir lives in this ephemeral
+        // mount namespace and is harmless, so don't fail the whole container on it.
+        // See ebusy-issue.md.
+        let _ = sys::rmdir(&oldproc);
     }
 
     if !container.runctl.contains(&Runctl::RootdirRW) {
